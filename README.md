@@ -2,20 +2,26 @@
 
 A working skeleton of the **adapter pattern** for routing e-invoice compliance
 calls between **Portugal (AT / Fiskaly)** and **Angola (AGT)** from a single
-Quarkus TMS Core.
+Quarkus TMS Core. **The Angola side is aligned to the real AGT DS.120 spec
+(v1.1, Nov 2025); see `AGT-spec-gap-analysis.md` for the full mapping.**
 
 ## Why this exists
 
 The TMS Core must issue fiscally valid invoices in two countries whose rules are
 ~70% similar but differ in the parts that hurt:
 
-| Concern | Portugal (AT via Fiskaly) | Angola (AGT) |
+| Concern | Portugal (AT via Fiskaly) | Angola (AGT, per DS.120) |
 |---|---|---|
-| Auth | Bearer token (24h, refreshable) | HTTP Basic (per-taxpayer) |
-| Signing | RSA hash chain (server-side at Fiskaly) | JWS RS256 detached (client-side) |
-| Submission model | Synchronous — ACCEPTED immediately | Asynchronous — PENDENTE, then poll |
-| QR code | Returned inline with the signed invoice | Returned only after PROCESSADO |
-| Reference | ATCUD | AGT factura id |
+| Protocol | REST/JSON | **Dual: SOAP + REST/JSON** via Oracle Service Bus |
+| Auth | Bearer token (24h, refreshable) | **HTTP Basic** (Username/Password headers, OWSM) |
+| Signing | RSA hash chain (server-side at Fiskaly) | **Two JWS RS256 signatures** per `registarFactura`: software-info signature + per-document signature; plus a request-level signature on `obterEstado`/`solicitarSerie`/`validarDocumento` |
+| Submission model | Synchronous — ACCEPTED immediately | **Synchronous receipt + deferred validation**: `registarFactura` returns `requestID` immediately; validation result comes from polling `obterEstado` |
+| Batch | One invoice per call | **Up to 30 invoices per `registarFactura` call** (`numberOfEntries` must match `documents[]` length — error E04) |
+| Validation artefact | base64 PNG QR code inline | **`reportUrl`** via `consultarFactura` (no base64 QR in the spec — the printed QR is generated client-side from validated data) |
+| Status vocab | ACCEPTED / REJECTED | `resultCode` 0/1/2/7/8/9 + per-document `documentStatus` V/I; `validarDocumento` returns S_A/S_C/S_I/S_RG/S_RJ/S_V |
+| Reference | ATCUD | AGT `requestID` (receipt) → `invoiceNo` (validated doc) |
+| Mandatory on every request | — | `softwareInfo` (productId, productVersion, softwareValidationNumber, jwsSoftwareSignature) — error E07 without it |
+| Idempotency | Fiskaly id | `submissionUUID` (UUID v4, unique per emitter) |
 
 Baking any of this into the Core would force two builds, two release trains,
 and a Core that knows about countries it shouldn't. The adapter pattern keeps
@@ -29,8 +35,11 @@ com.tms.compliance
 ├── domain                     # Country-agnostic DTOs
 │   ├── CountryCode            # The discriminator (PT | AO)
 │   ├── Invoice                # What the Core produces
-│   ├── Series                 # Document series
-│   └── SubmissionResult       # What the Core gets back
+│   ├── Series                 # Document series (incl. AGT authorizedQuantity/first/last)
+│   ├── SubmissionResult       # What the Core gets back (artefacts map: qrCodeBase64Png | reportUrl)
+│   ├── DocumentType           # FT / FR / NC / ND / ... (AGT §4.1.6 controlled vocab)
+│   ├── TaxType                # IVA / IS / IEC / NS
+│   └── TaxCode                # NOR / INT / RED / ISE / OUT
 │
 ├── spi                        # The Target (port) + shared qualifier
 │   ├── InvoiceComplianceAdapter   # THE interface the Core depends on
@@ -45,9 +54,12 @@ com.tms.compliance
 │   │       └── InMemoryFiskalyClient  # Fake for dev/tests
 │   │
 │   └── angola
-│       ├── AngolaComplianceAdapter     # Adapter #2 (wraps AgtClient)
+│       ├── AngolaComplianceAdapter     # Adapter #2 (wraps AgtClient, 7 endpoints)
+│       ├── AgtCredentialProducer       # CDI producer for software + emitter credentials
+│       ├── SoftwareCredentialProvider  # Vendor-level: productId/version/validationNumber + key
+│       ├── EmitterCredentialProvider   # Per-tenant: NIF + Basic Auth + private key
 │       └── client
-│           ├── AgtClient               # Adaptee interface
+│           ├── AgtClient               # Adaptee interface (7 services: registarFactura,
 │           └── InMemoryAgtClient       # Fake for dev/tests
 │
 ├── selector

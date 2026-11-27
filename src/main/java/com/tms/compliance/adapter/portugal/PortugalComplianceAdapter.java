@@ -34,8 +34,8 @@ import java.util.Optional;
  *   <li><b>ATCUD mapping.</b> Fiskaly's {@code atcud} field becomes
  *       {@link SubmissionResult#authorityReference()}.</li>
  *   <li><b>QR retrieval.</b> Fiskaly returns the QR inline with the signed
- *       invoice; no separate fetch needed. {@link #fetchQrCode(String)} still
- *       works as a fallback via {@link FiskalyClient#getInvoice}.</li>
+ *       invoice; no separate fetch needed. The QR is stored under the
+ *       {@code "qrCodeBase64Png"} key in {@link SubmissionResult#artefacts()}.</li>
  *   <li><b>Totals reconciliation.</b> The adapter re-checks net+tax=gross
  *       before calling Fiskaly, because Fiskaly will reject anyway — better to
  *       fail fast with a clear code.</li>
@@ -72,10 +72,15 @@ public class PortugalComplianceAdapter implements InvoiceComplianceAdapter {
                    in production the adapter would hold a per-merchant Fiskaly org. */
                 "PT-DEFAULT-NIF",
                 series.code(),
-                series.documentType()
+                series.documentType().name()
         );
         String validationCode = (String) resp.get("atcud_validation");
-        return new Series(series.code(), series.documentType(), series.validFrom(), validationCode);
+        return Series.forPortugal(
+                series.code(),
+                series.documentType(),
+                series.seriesYear(),
+                series.validFrom(),
+                validationCode);
     }
 
     @Override
@@ -101,21 +106,24 @@ public class PortugalComplianceAdapter implements InvoiceComplianceAdapter {
         // For PT, authorityReference encodes both the Fiskaly id (for later fetch)
         // and the ATCUD (for printing on the invoice). Pipe-separated for simplicity.
         String authorityReference = fiskalyId + "|" + atcud;
-        return SubmissionResult.accepted(invoice.id(), authorityReference, qr);
+        // PT genuinely returns a base64 QR PNG inline — store it under the
+        // conventional key. AO stores reportUrl instead.
+        Map<String, String> artefacts = qr != null ? Map.of("qrCodeBase64Png", qr) : Map.of();
+        return SubmissionResult.accepted(invoice.id(), authorityReference, artefacts);
     }
 
     @Override
     public SubmissionResult queryStatus(String authorityReference) {
         String[] parts = authorityReference.split("\\|", 2);
         String fiskalyId = parts[0];
-        String atcud = parts.length > 1 ? parts[1] : "";
         Map<String, Object> inv = fiskaly.getInvoice("PT-DEFAULT-NIF", fiskalyId);
         String state = String.valueOf(inv.get("state"));
         String qr = (String) inv.get("qr_code_base64");
         SubmissionResult.Status mapped = "ACCEPTED".equals(state)
                 ? SubmissionResult.Status.ACCEPTED
                 : SubmissionResult.Status.REJECTED;
-        return new SubmissionResult(null, mapped, authorityReference, qr, "");
+        Map<String, String> artefacts = qr != null ? Map.of("qrCodeBase64Png", qr) : Map.of();
+        return new SubmissionResult(null, mapped, authorityReference, artefacts, "");
     }
 
     @Override
@@ -150,13 +158,18 @@ public class PortugalComplianceAdapter implements InvoiceComplianceAdapter {
         request.put("series_code", "FT 2026/A"); // resolved from invoice context in production
         request.put("issue_date", invoice.issueDate().toString());
         request.put("currency", invoice.currency());
+        request.put("document_type", invoice.documentType().name());
         request.put("recipient_nif", invoice.recipientTaxId());
+        request.put("recipient_country", invoice.recipientCountry());
+        request.put("company_name", invoice.issuerName());
         request.put("lines", invoice.lines().stream()
                 .map(l -> Map.<String, Object>of(
                         "description", l.description(),
                         "quantity", l.quantity(),
                         "unit_price", l.unitPrice(),
-                        "vat_rate", l.vatRate(),
+                        "tax_type", l.taxType().name(),
+                        "tax_code", l.taxCode() != null ? l.taxCode().name() : "NOR",
+                        "tax_percentage", l.taxPercentage() != null ? l.taxPercentage() : BigDecimal.ZERO,
                         "net", l.lineNet(),
                         "tax", l.lineTax()))
                 .toList());

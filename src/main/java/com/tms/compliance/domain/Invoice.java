@@ -20,39 +20,53 @@ import java.util.UUID;
  */
 public final class Invoice {
 
-    /** Internal TMS id. Stable across retries. Used as the idempotency key downstream. */
+    /** Internal TMS id (UUID v4). Stable across retries. Used as AGT {@code submissionUUID} / idempotency key. */
     private final UUID id;
 
     /** Issuer's tax id in the issuing country (NIF in PT/AO — same shape, different registry). */
     private final String issuerTaxId;
 
-    /** Recipient's tax id. May be null for B2C retail. */
+    /** Recipient's tax id. May be null for B2C retail; "999999999" sentinel for unidentified AO buyers. */
     private final String recipientTaxId;
+
+    /** ISO 3166-1 alpha-2 country of the recipient ("AO" / "PT"). Used by AGT's {@code customerCountry}. */
+    private final String recipientCountry;
+
+    /** Issuer's company name (AGT {@code companyName} is mandatory on every document). */
+    private final String issuerName;
+
+    /** Document type (FT, FR, NC, ND, ...). See {@link DocumentType}. */
+    private final DocumentType documentType;
 
     /** ISO 4217 currency. EUR for PT, AOA for AO. */
     private final String currency;
 
-    /** Document date (issue date). */
+    /** Document date (issue date), format YYYY-MM-DD. */
     private final LocalDate issueDate;
 
-    /** Free-form business line items. VAT/IVA/IRT treatment is resolved by the adapter. */
+    /** Free-form business line items. Tax treatment is resolved by the adapter. */
     private final List<Line> lines;
 
-    /** Pre-tax total, computed by the Core. Adapters MUST re-check and reject on mismatch. */
+    /** Pre-tax total, computed by the Core. Adapters MUST re-check and reject on mismatch (AGT E23). */
     private final BigDecimal netTotal;
 
-    /** Tax total. */
+    /** Tax total. Adapters re-check (AGT E22). */
     private final BigDecimal taxTotal;
 
-    /** Gross total. netTotal + taxTotal must equal this exactly. */
+    /** Gross total. netTotal + taxTotal must equal this exactly (AGT E24). */
     private final BigDecimal grossTotal;
 
-    public Invoice(UUID id, String issuerTaxId, String recipientTaxId, String currency,
+    public Invoice(UUID id, String issuerTaxId, String issuerName,
+                   String recipientTaxId, String recipientCountry,
+                   DocumentType documentType, String currency,
                    LocalDate issueDate, List<Line> lines,
                    BigDecimal netTotal, BigDecimal taxTotal, BigDecimal grossTotal) {
         this.id = id;
         this.issuerTaxId = issuerTaxId;
+        this.issuerName = issuerName;
         this.recipientTaxId = recipientTaxId;
+        this.recipientCountry = recipientCountry;
+        this.documentType = documentType;
         this.currency = currency;
         this.issueDate = issueDate;
         this.lines = List.copyOf(lines); // defensive copy; immutability is sacred here
@@ -61,17 +75,28 @@ public final class Invoice {
         this.grossTotal = grossTotal;
     }
 
-    public UUID id()                  { return id; }
-    public String issuerTaxId()       { return issuerTaxId; }
-    public String recipientTaxId()    { return recipientTaxId; }
-    public String currency()          { return currency; }
-    public LocalDate issueDate()      { return issueDate; }
-    public List<Line> lines()         { return lines; }
-    public BigDecimal netTotal()      { return netTotal; }
-    public BigDecimal taxTotal()      { return taxTotal; }
-    public BigDecimal grossTotal()    { return grossTotal; }
+    public UUID id()                          { return id; }
+    public String issuerTaxId()               { return issuerTaxId; }
+    public String issuerName()                { return issuerName; }
+    public String recipientTaxId()            { return recipientTaxId; }
+    public String recipientCountry()          { return recipientCountry; }
+    public DocumentType documentType()        { return documentType; }
+    public String currency()                  { return currency; }
+    public LocalDate issueDate()              { return issueDate; }
+    public List<Line> lines()                 { return lines; }
+    public BigDecimal netTotal()              { return netTotal; }
+    public BigDecimal taxTotal()              { return taxTotal; }
+    public BigDecimal grossTotal()            { return grossTotal; }
 
-    /** A single invoice line. Kept minimal — adapters map it to whatever the backend needs. */
+    /**
+     * A single invoice line. Kept minimal — adapters map it to whatever the backend needs.
+     *
+     * @param taxType    IVA / IS / IEC / NS (see {@link TaxType})
+     * @param taxCode    NOR / INT / RED / ISE / OUT (see {@link TaxCode}); null for NS
+     * @param exemption  exemption code (M10..M99) when taxCode = ISE; null otherwise
+     */
     public record Line(String description, BigDecimal quantity, BigDecimal unitPrice,
-                       BigDecimal vatRate, BigDecimal lineNet, BigDecimal lineTax) {}
+                       TaxType taxType, TaxCode taxCode, String exemption,
+                       BigDecimal taxPercentage,
+                       BigDecimal lineNet, BigDecimal lineTax) {}
 }
