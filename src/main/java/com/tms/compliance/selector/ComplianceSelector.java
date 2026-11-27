@@ -1,8 +1,8 @@
 package com.tms.compliance.selector;
 
-import com.tms.compliance.adapter.portugal.CountryQualifier;
 import com.tms.compliance.domain.CountryCode;
 import com.tms.compliance.spi.ComplianceException;
+import com.tms.compliance.spi.CountryQualifier;
 import com.tms.compliance.spi.InvoiceComplianceAdapter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -45,11 +45,14 @@ public class ComplianceSelector {
     @Inject
     public ComplianceSelector(Instance<InvoiceComplianceAdapter> adapters) {
         Map<CountryCode, InvoiceComplianceAdapter> map = new EnumMap<>(CountryCode.class);
-        for (InvoiceComplianceAdapter adapter : adapters) {
-            CountryCode c = adapter.country();
-            if (map.put(c, adapter) != null) {
-                throw new IllegalStateException(
-                        "Duplicate InvoiceComplianceAdapter registered for country " + c);
+        // Null-safe so test subclasses can override forCountry() without a CDI Instance.
+        if (adapters != null) {
+            for (InvoiceComplianceAdapter adapter : adapters) {
+                CountryCode c = adapter.country();
+                if (map.put(c, adapter) != null) {
+                    throw new IllegalStateException(
+                            "Duplicate InvoiceComplianceAdapter registered for country " + c);
+                }
             }
         }
         this.byCountry = map;

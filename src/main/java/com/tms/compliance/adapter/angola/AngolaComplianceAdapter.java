@@ -1,6 +1,7 @@
 package com.tms.compliance.adapter.angola;
 
 import com.tms.compliance.adapter.angola.client.AgtClient;
+import com.tms.compliance.adapter.angola.crypto.JwsSigner;
 import com.tms.compliance.domain.CountryCode;
 import com.tms.compliance.domain.Invoice;
 import com.tms.compliance.domain.Series;
@@ -111,30 +112,47 @@ public class AngolaComplianceAdapter implements InvoiceComplianceAdapter {
 
     @Override
     public SubmissionResult submit(Invoice invoice) {
-        reconcileTotals(invoice);
+        return submitBatch(List.of(invoice)).get(0);
+    }
 
-        // Build the full RegistarFacturaRequest per DS.120 §4.1.
-        Map<String, Object> request = buildRegistarFacturaRequest(List.of(invoice));
+    /**
+     * Real AGT batch submission (DS.120 §4.1.6): one {@code registarFactura}
+     * call carrying up to 30 documents sharing one {@code submissionUUID} and
+     * one software signature, each document carrying its own
+     * {@code jwsDocumentSignature}.
+     *
+     * <p>At ~100 calls/day QoS this is the only way a high-volume courier TMS
+     * stays under the ceiling: 30 invoices × 100 calls = 3,000 invoices/day.</p>
+     */
+    @Override
+    public List<SubmissionResult> submitBatch(List<Invoice> invoices) {
+        if (invoices == null || invoices.isEmpty()) {
+            throw new ComplianceException("BATCH_EMPTY", "submitBatch requires at least one invoice");
+        }
+        if (invoices.size() > 30) {
+            throw new ComplianceException(
+                    "AGT_BATCH_TOO_LARGE",
+                    "AGT accepts at most 30 invoices per registarFactura (DS.120 §4.1.6); got " + invoices.size());
+        }
+        invoices.forEach(this::reconcileTotals);
 
+        Map<String, Object> request = buildRegistarFacturaRequest(invoices);
         Map<String, Object> response = agt.registarFactura(request);
 
-        // AGT returns requestID synchronously (validation is deferred).
         String requestId = String.valueOf(response.get("requestID"));
         if (requestId == null || "null".equals(requestId)) {
-            List<Map<String, Object>> errors = errorList(response);
             throw new ComplianceException(
                     "AGT_SUBMIT_REJECTED",
-                    "AGT rejected the submission: " + errors);
+                    "AGT rejected the submission: " + errorList(response));
         }
 
-        // authorityReference encodes requestID + the documentNo so queryStatus
-        // can poll and fetchReportUrl can later resolve the invoice.
-        String documentNo = deriveDocumentNo(invoice);
-        String authorityReference = requestId + "|" + documentNo;
-        return SubmissionResult.pending(
-                invoice.id(),
-                authorityReference,
-                "AGT acknowledged submission; poll obterEstado for validation result");
+        // One PENDING result per invoice, all sharing the same requestID.
+        return invoices.stream()
+                .map(inv -> SubmissionResult.pending(
+                        inv.id(),
+                        requestId + "|" + deriveDocumentNo(inv),
+                        "AGT acknowledged batch submission; poll obterEstado for per-document validation"))
+                .toList();
     }
 
     // -------------------------------------------------------------- registerSeries
@@ -387,24 +405,43 @@ public class AngolaComplianceAdapter implements InvoiceComplianceAdapter {
         }
     }
 
-    // ---- JWS signing stubs --------------------------------------------------
-    // In production these use nimbus-jose-jwt with the real RSA private keys
-    // from SoftwareCredentialProvider / EmitterCredentialProvider. The skeleton
-    // returns placeholder strings so the project compiles without the crypto
-    // dependency.
+    // ---- JWS RS256 signing (real, via nimbus-jose-jwt) --------------------
+    // DS.120 §4.1.6 mandates three signatures. Each builds the canonical claims
+    // map, then delegates to JwsSigner. When the configured private key is null
+    // (skeleton, no keystore), JwsSigner returns a deterministic stub so the
+    // project runs end-to-end without real keys. Production loads RSA keys via
+    // SoftwareCredentialProvider / EmitterCredentialProvider.
 
     private String signSoftwareInfo(Map<String, Object> softwareInfoDetail) {
-        return "jws-software-stub:" + softwareInfoDetail.hashCode();
+        // §4.1.6: signs over productId, productVersion, softwareValidationNumber.
+        Map<String, Object> claims = new LinkedHashMap<>(softwareInfoDetail);
+        return JwsSigner.sign(claims, softwareCredential.softwarePrivateKey());
     }
 
     private String signDocument(Invoice invoice, String documentNo) {
-        // Signs over: documentNo, taxRegistrationNumber, documentType, documentDate,
-        // customerTaxID, customerCountry, companyName, documentTotals.
-        return "jws-document-stub:" + documentNo;
+        // §4.1.6: signs over documentNo, taxRegistrationNumber, documentType,
+        // documentDate, customerTaxID, customerCountry, companyName, documentTotals.
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("documentNo", documentNo);
+        claims.put("taxRegistrationNumber", emitterCredential.nif());
+        claims.put("documentType", invoice.documentType().name());
+        claims.put("documentDate", invoice.issueDate().toString());
+        claims.put("customerTaxID", invoice.recipientTaxId() != null ? invoice.recipientTaxId() : "999999999");
+        claims.put("customerCountry", invoice.recipientCountry() != null ? invoice.recipientCountry() : "AO");
+        claims.put("companyName", invoice.issuerName());
+        claims.put("documentTotals", buildDocumentTotals(invoice));
+        return JwsSigner.sign(claims, emitterCredential.emitterPrivateKey());
     }
 
     private String signRequest(String nif, String requestId) {
-        // Signs over: taxRegistrationNumber + requestID (or relevant fields per service).
-        return "jws-request-stub:" + nif + ":" + requestId;
+        // §4.2/§4.5/§4.7: signs over taxRegistrationNumber + requestID (or the
+        // relevant request fields per service). For solicitarSerie the
+        // "requestID" slot carries seriesYear/documentType instead — the adapter
+        // passes whatever string is most relevant; AGT verifies against the
+        // same canonical concatenation.
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("taxRegistrationNumber", nif);
+        claims.put("requestID", requestId);
+        return JwsSigner.sign(claims, emitterCredential.emitterPrivateKey());
     }
 }

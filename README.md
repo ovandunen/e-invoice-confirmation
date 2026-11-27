@@ -241,18 +241,86 @@ curl 'http://localhost:8080/demo/issue?country=AO'
 
 ## What is intentionally NOT here
 
-- **No real HTTP clients.** `FiskalyClient` and `AgtClient` are skeletons so
-  the pattern compiles and runs without external services. Real
-  `@RegisterRestClient` interfaces are a drop-in replacement.
-- **No JWS signing.** `AngolaComplianceAdapter.signAsJws` is a stub. In
-  production you'd use `nimbus-jose-jwt` (already listed, commented out, in
-  the pom).
+- **No real HTTP clients to Fiskaly/AGT.** `FiskalyClient` and `AgtClient` are
+  in-memory fakes so the pattern compiles, runs and is testable end-to-end
+  without external services. Real `@RegisterRestClient` interfaces are a
+  drop-in replacement (same method signatures).
+- **JWS signing IS implemented** (nimbus-jose-jwt, `JwsSigner`). It uses a real
+  RSA key when one is supplied by `SoftwareCredentialProvider` /
+  `EmitterCredentialProvider`, and falls back to a deterministic stub when no
+  key is configured (the skeleton default) so the project runs without a
+  keystore. Wire real keys from a secret manager in production.
 - **No SAF-T exporters.** SAF-T (PT) and SAF-T (AO) are separate concerns
   (monthly file submission, not per-invoice). They belong in a sibling
   `SaftExporter` SPI with the same country-adapter shape — out of scope here.
 - **No persistence.** The skeleton uses in-memory maps. Production adds a
   `SubmissionRecord` Panache entity keyed by `(tenantNif, invoiceId)` to track
   the `authorityReference` and last-known status across polls and webhooks.
+- **PT payment rail not implemented.** The AO Multicaixa rail ships; PT (MB
+  WAY / SIBS multibanco) is a sibling `SibsClient` under the same
+  `PaymentService` boundary — a pure addition when needed.
+
+## TMS Core + Payment (beyond fiscal compliance)
+
+The skeleton also ships a minimal TMS Core that consumes the compliance facade,
+so the whole seam is visible in one repo:
+
+```
+com.tms.core
+├── order/Order             # transport order (country-tagged)
+├── fleet/Vehicle           # a vehicle, available/reserved
+├── dispatch/
+│   ├── Trip                # one order + one vehicle, ASSIGNED→COMPLETED
+│   └── DispatchService     # assigns vehicles, completes trips
+├── billing/
+│   └── BillingService      # Trip(COMPLETED) → Invoice → ComplianceFacade.submit
+│                           # applies per-country IVA (PT 23%, AO 14%)
+└── payment/
+    ├── MulticaixaClient    # AO payment rail (Express + card-present)
+    ├── InMemoryMulticaixaClient
+    └── PaymentService      # country-agnostic facade over payment rails
+```
+
+End-to-end flow:
+
+```
+Order(NEW) ──dispatch──► Trip(ASSIGNED) ──complete──► Trip(COMPLETED)
+                                                          │
+                                  PaymentService.collect  │  BillingService.invoiceTrip
+                                            ▼             ▼
+                                  Multicaixa/SIBS    ComplianceFacade.submit
+                                                          │
+                                          PT: ACCEPTED + QR   AO: PENDING → poll → ACCEPTED + reportUrl
+```
+
+## Tests
+
+Plain JUnit 5 + AssertJ — no Quarkus container needed. Each test builds the
+adapters by hand with in-memory clients and (for AO) a real generated RSA key
+pair, so the JWS path is exercised with nimbus-jose-jwt, not just the stub.
+
+```
+src/test/java/com/tms/
+├── compliance/adapter/angola/AngolaComplianceAdapterTest.java
+│     • AO lifecycle: submit→PENDING, poll→PENDING(8), poll→ACCEPTED(0)+reportUrl
+│     • batch: 3 invoices share one requestID; 31 rejected; empty rejected
+│     • totals reconciliation rejects non-matching invoices
+│     • series registration returns AGT authorized range
+│     • JwsSigner: real signing, determinism, insertion-order independence, stub fallback
+├── compliance/adapter/portugal/PortugalComplianceAdapterTest.java
+│     • PT synchronous: submit→ACCEPTED+QR immediately
+│     • queryStatus returns cached ACCEPTED; fetchQrCode returns the PNG
+│     • batch loops per-invoice (Fiskaly doesn't batch)
+├── core/payment/MulticaixaClientTest.java
+│     • card-present approves immediately; Express PENDING→APPROVED on 2nd poll
+│     • refund flips to REFUNDED; PT rail throws UnsupportedOperationException
+└── core/billing/BillingIntegrationTest.java
+      • full AO flow: order→dispatch→complete→invoice→poll→poll→ACCEPTED+reportUrl
+      • full PT flow: order→dispatch→complete→invoice→ACCEPTED+QR
+      • dispatch fails when no vehicle; cannot invoice a non-completed trip
+```
+
+Run with `mvn test`.
 
 ## Files
 
