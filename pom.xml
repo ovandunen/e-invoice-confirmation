@@ -38,10 +38,6 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-resteasy-reactive-jackson</artifactId>
         </dependency>
-        <dependency>
-            <groupId>io.quarkus</groupId>
-            <artifactId>quarkus-smallrye-config</artifactId>
-        </dependency>
 
         <!-- For production: a real REST client for Fiskaly / AGT -->
         <!--
@@ -56,12 +52,28 @@
         -->
 
         <!-- For AGT JWS RS256 signing (Angola adapter) -->
-        <!--
         <dependency>
             <groupId>com.nimbusds</groupId>
             <artifactId>nimbus-jose-jwt</artifactId>
             <version>9.40</version>
         </dependency>
-        -->
+
+        <!-- Test: JUnit 5 + Quarkus component testing -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.25.3</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 </project>

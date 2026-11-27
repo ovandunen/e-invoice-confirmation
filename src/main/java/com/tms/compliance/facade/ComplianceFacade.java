@@ -9,6 +9,8 @@ import com.tms.compliance.spi.InvoiceComplianceAdapter;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.List;
+
 /**
  * The single entry point the Quarkus TMS Core calls.
  *
@@ -65,6 +67,15 @@ public class ComplianceFacade {
      */
     public SubmissionResult submit(CountryCode country, Invoice invoice) {
         return adapter(country).submit(invoice);
+    }
+
+    /**
+     * Submit a batch of invoices in one authority call (AGT: up to 30 per
+     * {@code registarFactura}). Returns one result per invoice, input order
+     * preserved.
+     */
+    public List<SubmissionResult> submitBatch(CountryCode country, List<Invoice> invoices) {
+        return adapter(country).submitBatch(invoices);
     }
 
     /**

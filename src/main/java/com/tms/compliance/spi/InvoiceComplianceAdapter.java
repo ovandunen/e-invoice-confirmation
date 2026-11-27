@@ -5,6 +5,7 @@ import com.tms.compliance.domain.Invoice;
 import com.tms.compliance.domain.Series;
 import com.tms.compliance.domain.SubmissionResult;
 
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -76,6 +77,31 @@ public interface InvoiceComplianceAdapter {
      *         or the authority returned a hard error before accepting the request.
      */
     SubmissionResult submit(Invoice invoice);
+
+    /**
+     * Submit a batch of invoices in a single authority call.
+     *
+     * <p>AGT (DS.120 §4.1.6) accepts up to 30 invoices per
+     * {@code registarFactura} call, sharing one {@code submissionUUID} and
+     * software signature. Fiskaly/AT process one invoice per call, so the
+     * default implementation here loops {@link #submit(Invoice)} — adapters
+     * that genuinely batch override this.</p>
+     *
+     * <p>The returned list is in the same order as the input; one
+     * {@link SubmissionResult} per invoice. For AGT, each result carries the
+     * same {@code requestID} in {@link SubmissionResult#authorityReference()}
+     * (plus its own {@code documentNo}); the caller polls once and reads
+     * per-document status from the result.</p>
+     *
+     * @throws ComplianceException if the batch is empty, exceeds the authority's
+     *         limit, or any invoice fails pre-flight totals reconciliation.
+     */
+    default List<SubmissionResult> submitBatch(List<Invoice> invoices) {
+        if (invoices == null || invoices.isEmpty()) {
+            throw new ComplianceException("BATCH_EMPTY", "submitBatch requires at least one invoice");
+        }
+        return invoices.stream().map(this::submit).toList();
+    }
 
     /**
      * Poll the current status of a previously-submitted invoice.
